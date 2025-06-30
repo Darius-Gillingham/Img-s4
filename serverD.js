@@ -1,6 +1,3 @@
-// File: serverD.js
-// Commit: update to randomly select prompts from all available files with validation
-
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
@@ -19,7 +16,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 async function listAllPromptFiles() {
   const { data: files, error } = await supabase.storage.from('prompts').list('', {
     limit: 100,
-    sortBy: { column: 'name', order: 'desc' }
+    sortBy: { column: 'name', order: 'asc' }
   });
 
   if (error || !files) {
@@ -27,10 +24,10 @@ async function listAllPromptFiles() {
     return [];
   }
 
-  return files.filter(f => f.name.endsWith('.json') && !f.name.endsWith('.done.json'));
+  return files.filter(f => f.name.endsWith('.json'));
 }
 
-async function loadPromptsFromFile(filename) {
+async function loadPrompts(filename) {
   const { data, error } = await supabase.storage.from('prompts').download(filename);
   if (error || !data) {
     console.error(`✗ Failed to download ${filename}:`, error);
@@ -47,8 +44,8 @@ async function loadPromptsFromFile(filename) {
   }
 }
 
-function getRandomElement(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+function getRandomPrompt(prompts) {
+  return prompts[Math.floor(Math.random() * prompts.length)];
 }
 
 async function downloadImageBuffer(url) {
@@ -78,10 +75,7 @@ function getTimestampedFilename(index) {
 }
 
 async function generateImage(prompt, index) {
-  const safePrompt = typeof prompt === 'string' ? prompt.trim() : '';
-  if (!safePrompt) throw new Error('Empty or invalid prompt');
-
-  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${safePrompt}`;
+  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`;
 
   const response = await openai.images.generate({
     model: 'dall-e-3',
@@ -98,47 +92,39 @@ async function generateImage(prompt, index) {
   await uploadImageToBucket(buffer, filename);
 }
 
-async function runBatch(batchSize = 5) {
+async function run(batchSize = 5) {
   const files = await listAllPromptFiles();
   if (files.length === 0) {
-    console.log('No prompt files available.');
+    console.log('No prompt files found.');
     return;
   }
 
-  const allPrompts = [];
+  // Use all prompts from all files
+  let allPrompts = [];
   for (const file of files) {
-    const prompts = await loadPromptsFromFile(file.name);
+    const prompts = await loadPrompts(file.name);
     allPrompts.push(...prompts);
   }
 
   if (allPrompts.length === 0) {
-    console.log('No prompts found in any file.');
+    console.log('No prompts available.');
     return;
   }
 
-  console.log(`→ Generating ${batchSize} images from ${allPrompts.length} available prompts`);
+  console.log(`→ Generating ${batchSize} images from random prompts`);
 
   for (let i = 0; i < batchSize; i++) {
-    const prompt = getRandomElement(allPrompts);
+    const prompt = getRandomPrompt(allPrompts);
     try {
       await generateImage(prompt, i);
     } catch (err) {
       console.warn(`✗ Failed to generate image #${i + 1}:`, err);
     }
   }
+
+  console.log('✓ Batch complete.');
 }
 
-async function loopForever(intervalMs = 30000) {
-  while (true) {
-    try {
-      await runBatch(5);
-    } catch (err) {
-      console.error('✗ Batch failed:', err);
-    }
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
-  }
-}
-
-loopForever().catch(err => {
+run().catch(err => {
   console.error('✗ serverD failed:', err);
 });
