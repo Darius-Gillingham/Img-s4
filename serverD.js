@@ -1,3 +1,6 @@
+// File: serverD.js
+// Commit: update to randomly select prompts from all available files with validation
+
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
@@ -24,7 +27,7 @@ async function listAllPromptFiles() {
     return [];
   }
 
-  return files.filter(f => f.name.endsWith('.json'));
+  return files.filter(f => f.name.endsWith('.json') && !f.name.endsWith('.done.json'));
 }
 
 async function loadPromptsFromFile(filename) {
@@ -48,12 +51,6 @@ function getRandomElement(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function getTimestampedFilename(index) {
-  const now = new Date();
-  const tag = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  return `image-${tag}-${index + 1}.png`;
-}
-
 async function downloadImageBuffer(url) {
   const res = await axios.get(url, { responseType: 'arraybuffer' });
   return res.data;
@@ -74,56 +71,59 @@ async function uploadImageToBucket(buffer, filename) {
   }
 }
 
+function getTimestampedFilename(index) {
+  const now = new Date();
+  const tag = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  return `image-${tag}-${index + 1}.png`;
+}
+
 async function generateImage(prompt, index) {
-  const trimmedPrompt = prompt.trim();
-  console.log(`→ Prompt #${index + 1}:`, trimmedPrompt);
+  const safePrompt = typeof prompt === 'string' ? prompt.trim() : '';
+  if (!safePrompt) throw new Error('Empty or invalid prompt');
 
-  try {
-    const response = await openai.images.generate({
-      model: 'dall-e-3',
-      prompt: trimmedPrompt,
-      n: 1,
-      size: '1024x1024'
-    });
+  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${safePrompt}`;
 
-    const url = response.data?.[0]?.url;
-    if (!url) throw new Error('No image URL returned.');
+  const response = await openai.images.generate({
+    model: 'dall-e-3',
+    prompt: cleanPrompt,
+    n: 1,
+    size: '1024x1024'
+  });
 
-    const buffer = await downloadImageBuffer(url);
-    const filename = getTimestampedFilename(index);
-    await uploadImageToBucket(buffer, filename);
-  } catch (err) {
-    throw new Error(`Image generation failed for prompt "${trimmedPrompt}": ${err.message || err}`);
-  }
+  const url = response.data?.[0]?.url;
+  if (!url) throw new Error('No image URL returned.');
+
+  const buffer = await downloadImageBuffer(url);
+  const filename = getTimestampedFilename(index);
+  await uploadImageToBucket(buffer, filename);
 }
 
 async function runBatch(batchSize = 5) {
   const files = await listAllPromptFiles();
   if (files.length === 0) {
-    console.log('No prompt files found.');
+    console.log('No prompt files available.');
     return;
   }
 
-  const selectedFile = getRandomElement(files);
-  const prompts = await loadPromptsFromFile(selectedFile.name);
-  if (prompts.length === 0) {
-    console.log(`No prompts found in ${selectedFile.name}`);
+  const allPrompts = [];
+  for (const file of files) {
+    const prompts = await loadPromptsFromFile(file.name);
+    allPrompts.push(...prompts);
+  }
+
+  if (allPrompts.length === 0) {
+    console.log('No prompts found in any file.');
     return;
   }
 
-  console.log(`→ Generating ${batchSize} images from ${selectedFile.name}`);
+  console.log(`→ Generating ${batchSize} images from ${allPrompts.length} available prompts`);
 
   for (let i = 0; i < batchSize; i++) {
-    const prompt = getRandomElement(prompts);
-    if (!prompt || typeof prompt !== 'string' || prompt.length < 10) {
-      console.warn(`✗ Skipping invalid or short prompt #${i + 1}`);
-      continue;
-    }
-
+    const prompt = getRandomElement(allPrompts);
     try {
       await generateImage(prompt, i);
     } catch (err) {
-      console.warn(`✗ Failed to generate image #${i + 1}:`, err.message || err);
+      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
     }
   }
 }
@@ -133,12 +133,12 @@ async function loopForever(intervalMs = 30000) {
     try {
       await runBatch(5);
     } catch (err) {
-      console.error('✗ Batch failed:', err.message || err);
+      console.error('✗ Batch failed:', err);
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 }
 
 loopForever().catch(err => {
-  console.error('✗ serverD failed:', err.message || err);
+  console.error('✗ serverD failed:', err);
 });
