@@ -74,17 +74,14 @@ async function uploadImageToBucket(buffer, filename) {
   }
 }
 
-function sanitizePrompt(prompt) {
-  return `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`.trim();
-}
-
 async function generateImage(prompt, index) {
-  const cleanPrompt = sanitizePrompt(prompt);
+  const trimmedPrompt = prompt.trim();
+  console.log(`→ Prompt #${index + 1}:`, trimmedPrompt);
 
   try {
     const response = await openai.images.generate({
       model: 'dall-e-3',
-      prompt: cleanPrompt,
+      prompt: trimmedPrompt,
       n: 1,
       size: '1024x1024'
     });
@@ -96,7 +93,7 @@ async function generateImage(prompt, index) {
     const filename = getTimestampedFilename(index);
     await uploadImageToBucket(buffer, filename);
   } catch (err) {
-    throw new Error(`Image generation failed: ${err.message || err}`);
+    throw new Error(`Image generation failed for prompt "${trimmedPrompt}": ${err.message || err}`);
   }
 }
 
