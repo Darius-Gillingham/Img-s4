@@ -1,6 +1,3 @@
-// File: serverD.js
-// Commit: pull prompts from Supabase `prompts/` bucket and upload generated images to `generated-images/` bucket
-
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
@@ -16,10 +13,10 @@ const supabase = createClient(
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function listUnprocessedPromptFiles() {
+async function listAllPromptFiles() {
   const { data: files, error } = await supabase.storage.from('prompts').list('', {
     limit: 100,
-    sortBy: { column: 'name', order: 'asc' }
+    sortBy: { column: 'name', order: 'desc' }
   });
 
   if (error || !files) {
@@ -27,10 +24,10 @@ async function listUnprocessedPromptFiles() {
     return [];
   }
 
-  return files.filter(f => f.name.endsWith('.json') && !f.name.endsWith('.done.json'));
+  return files.filter(f => f.name.endsWith('.json'));
 }
 
-async function loadPrompts(filename) {
+async function loadPromptsFromFile(filename) {
   const { data, error } = await supabase.storage.from('prompts').download(filename);
   if (error || !data) {
     console.error(`✗ Failed to download ${filename}:`, error);
@@ -45,6 +42,10 @@ async function loadPrompts(filename) {
     console.warn(`✗ Failed to parse prompts in ${filename}`);
     return [];
   }
+}
+
+function getRandomElement(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 async function downloadImageBuffer(url) {
@@ -67,14 +68,18 @@ async function uploadImageToBucket(buffer, filename) {
   }
 }
 
-function getBatchTagFromFilename(name) {
-  return name.replace(/^generated-prompts-/, '').replace(/\.json$/, '');
+function getTimestampedFilename(index) {
+  const now = new Date();
+  const tag = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  return `image-${tag}-${index + 1}.png`;
 }
 
-async function generateImage(prompt, index, tag) {
+async function generateImage(prompt, index) {
+  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`;
+
   const response = await openai.images.generate({
     model: 'dall-e-3',
-    prompt,
+    prompt: cleanPrompt,
     n: 1,
     size: '1024x1024'
   });
@@ -83,51 +88,47 @@ async function generateImage(prompt, index, tag) {
   if (!url) throw new Error('No image URL returned.');
 
   const buffer = await downloadImageBuffer(url);
-  const filename = `image-${tag}-${index + 1}.png`;
+  const filename = getTimestampedFilename(index);
   await uploadImageToBucket(buffer, filename);
 }
 
-async function flagPromptFileDone(name) {
-  const { error } = await supabase.storage
-    .from('prompts')
-    .move(name, name.replace('.json', '.done.json'));
+async function runBatch(batchSize = 5) {
+  const files = await listAllPromptFiles();
+  if (files.length === 0) {
+    console.log('No prompt files found.');
+    return;
+  }
 
-  if (error) console.error(`✗ Failed to flag ${name} as done:`, error);
-  else console.log(`✓ Flagged ${name} as complete`);
+  const selectedFile = getRandomElement(files);
+  const prompts = await loadPromptsFromFile(selectedFile.name);
+  if (prompts.length === 0) {
+    console.log(`No prompts found in ${selectedFile.name}`);
+    return;
+  }
+
+  console.log(`→ Generating ${batchSize} images from ${selectedFile.name}`);
+
+  for (let i = 0; i < batchSize; i++) {
+    const prompt = getRandomElement(prompts);
+    try {
+      await generateImage(prompt, i);
+    } catch (err) {
+      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+    }
+  }
 }
 
 async function loopForever(intervalMs = 30000) {
   while (true) {
     try {
-      const files = await listUnprocessedPromptFiles();
-      if (files.length === 0) {
-        console.log('No unprocessed prompt files.');
-        await new Promise(res => setTimeout(res, intervalMs));
-        continue;
-      }
-
-      for (const file of files) {
-        const prompts = await loadPrompts(file.name);
-        const tag = getBatchTagFromFilename(file.name);
-
-        for (let i = 0; i < prompts.length; i++) {
-          try {
-            await generateImage(prompts[i], i, tag);
-          } catch (err) {
-            console.warn(`✗ Failed to generate image #${i + 1}:`, err);
-          }
-        }
-
-        await flagPromptFileDone(file.name);
-      }
-
-      console.log('✓ Batch complete.');
+      await runBatch(5);
     } catch (err) {
-      console.error('✗ serverD loop failed:', err);
+      console.error('✗ Batch failed:', err);
     }
-
-    await new Promise(res => setTimeout(res, intervalMs));
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 }
 
-loopForever();
+loopForever().catch(err => {
+  console.error('✗ serverD failed:', err);
+});
