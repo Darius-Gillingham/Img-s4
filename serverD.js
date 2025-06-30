@@ -1,11 +1,12 @@
 // File: serverD.js
-// Commit: convert TypeScript DALL·E image rendering server to JavaScript with .done flagging preserved and batch-tagged downloads
+// Commit: convert serverD to fetch prompts directly from Supabase and render DALL·E images in batches
 
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import path from 'path';
 import axios from 'axios';
 import OpenAI from 'openai';
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
@@ -13,34 +14,55 @@ console.log('=== Running serverD.js ===');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const PROMPT_DIR = './data/generated';
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE
+);
+
 const IMAGE_DIR = './data/images';
 
 async function ensureImageDir() {
   await fs.mkdir(IMAGE_DIR, { recursive: true });
 }
 
-async function loadPromptFiles() {
-  const files = await fs.readdir(PROMPT_DIR);
-  const validFiles = [];
+async function fetchPendingPromptBatch() {
+  const { data, error } = await supabase
+    .from('prompt_batches')
+    .select('*')
+    .eq('processed', false)
+    .order('created_at', { ascending: true })
+    .limit(1);
 
-  for (const f of files) {
-    if (f.startsWith('generated-prompts-') && f.endsWith('.json')) {
-      try {
-        await fs.access(path.join(PROMPT_DIR, f + '.done'));
-      } catch {
-        validFiles.push(f);
-      }
-    }
+  if (error) {
+    console.error('✗ Failed to fetch pending batch:', error);
+    return null;
   }
 
-  return validFiles;
+  return data?.[0] || null;
 }
 
-async function loadPromptsFromFile(file) {
-  const content = await fs.readFile(path.join(PROMPT_DIR, file), 'utf-8');
-  const parsed = JSON.parse(content);
-  return Array.isArray(parsed.prompts) ? parsed.prompts : [];
+async function markBatchAsDone(batchId) {
+  const { error } = await supabase
+    .from('prompt_batches')
+    .update({ processed: true })
+    .eq('id', batchId);
+
+  if (error) {
+    console.error('✗ Failed to mark batch as done:', error);
+  } else {
+    console.log(`✓ Marked batch ${batchId} as complete`);
+  }
+}
+
+async function parseBatchPrompts(batch) {
+  try {
+    const parsed = JSON.parse(batch.prompts);
+    if (Array.isArray(parsed)) return parsed;
+    return [];
+  } catch {
+    console.warn('✗ Failed to parse prompt batch JSON');
+    return [];
+  }
 }
 
 async function downloadImage(url, filename) {
@@ -70,37 +92,33 @@ async function generateImage(prompt, index, batchTag) {
   await downloadImage(url, filename);
 }
 
-function getBatchTagFromFilename(filename) {
-  return filename.replace(/^generated-prompts-/, '').replace(/\.json$/, '');
+function getBatchTagFromTimestamp(ts) {
+  return ts.replace(/[-:T]/g, '').slice(0, 14);
 }
 
 async function run() {
   await ensureImageDir();
-  const files = await loadPromptFiles();
 
-  if (files.length === 0) {
-    console.log('No unprocessed prompt files found.');
+  const batch = await fetchPendingPromptBatch();
+  if (!batch) {
+    console.log('No unprocessed prompt batches found.');
     return;
   }
 
-  for (const file of files) {
-    const prompts = await loadPromptsFromFile(file);
-    const batchTag = getBatchTagFromFilename(file);
+  const prompts = await parseBatchPrompts(batch);
+  const batchTag = getBatchTagFromTimestamp(batch.created_at);
 
-    console.log(`→ Rendering ${prompts.length} prompts from ${file}`);
+  console.log(`→ Rendering ${prompts.length} prompts from batch ${batch.id}`);
 
-    for (let i = 0; i < prompts.length; i++) {
-      try {
-        await generateImage(prompts[i], i, batchTag);
-      } catch (err) {
-        console.warn(`✗ Failed to generate image #${i + 1}:`, err);
-      }
+  for (let i = 0; i < prompts.length; i++) {
+    try {
+      await generateImage(prompts[i], i, batchTag);
+    } catch (err) {
+      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
     }
-
-    await fs.writeFile(path.join(PROMPT_DIR, file + '.done'), '', 'utf-8');
-    console.log(`✓ Flagged ${file} as complete`);
   }
 
+  await markBatchAsDone(batch.id);
   console.log('✓ All image generations complete.');
 }
 
