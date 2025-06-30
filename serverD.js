@@ -48,6 +48,12 @@ function getRandomElement(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function getTimestampedFilename(index) {
+  const now = new Date();
+  const tag = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  return `image-${tag}-${index + 1}.png`;
+}
+
 async function downloadImageBuffer(url) {
   const res = await axios.get(url, { responseType: 'arraybuffer' });
   return res.data;
@@ -68,28 +74,30 @@ async function uploadImageToBucket(buffer, filename) {
   }
 }
 
-function getTimestampedFilename(index) {
-  const now = new Date();
-  const tag = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  return `image-${tag}-${index + 1}.png`;
+function sanitizePrompt(prompt) {
+  return `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`.trim();
 }
 
 async function generateImage(prompt, index) {
-  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`;
+  const cleanPrompt = sanitizePrompt(prompt);
 
-  const response = await openai.images.generate({
-    model: 'dall-e-3',
-    prompt: cleanPrompt,
-    n: 1,
-    size: '1024x1024'
-  });
+  try {
+    const response = await openai.images.generate({
+      model: 'dall-e-3',
+      prompt: cleanPrompt,
+      n: 1,
+      size: '1024x1024'
+    });
 
-  const url = response.data?.[0]?.url;
-  if (!url) throw new Error('No image URL returned.');
+    const url = response.data?.[0]?.url;
+    if (!url) throw new Error('No image URL returned.');
 
-  const buffer = await downloadImageBuffer(url);
-  const filename = getTimestampedFilename(index);
-  await uploadImageToBucket(buffer, filename);
+    const buffer = await downloadImageBuffer(url);
+    const filename = getTimestampedFilename(index);
+    await uploadImageToBucket(buffer, filename);
+  } catch (err) {
+    throw new Error(`Image generation failed: ${err.message || err}`);
+  }
 }
 
 async function runBatch(batchSize = 5) {
@@ -110,10 +118,15 @@ async function runBatch(batchSize = 5) {
 
   for (let i = 0; i < batchSize; i++) {
     const prompt = getRandomElement(prompts);
+    if (!prompt || typeof prompt !== 'string' || prompt.length < 10) {
+      console.warn(`✗ Skipping invalid or short prompt #${i + 1}`);
+      continue;
+    }
+
     try {
       await generateImage(prompt, i);
     } catch (err) {
-      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+      console.warn(`✗ Failed to generate image #${i + 1}:`, err.message || err);
     }
   }
 }
@@ -123,12 +136,12 @@ async function loopForever(intervalMs = 30000) {
     try {
       await runBatch(5);
     } catch (err) {
-      console.error('✗ Batch failed:', err);
+      console.error('✗ Batch failed:', err.message || err);
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 }
 
 loopForever().catch(err => {
-  console.error('✗ serverD failed:', err);
+  console.error('✗ serverD failed:', err.message || err);
 });
