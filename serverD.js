@@ -1,77 +1,77 @@
 // File: serverD.js
-// Commit: convert serverD to fetch prompts directly from Supabase and render DALL·E images in batches
+// Commit: pull prompts from Supabase `prompts/` bucket and upload generated images to `generated-images/` bucket
 
 import dotenv from 'dotenv';
-import fs from 'fs/promises';
-import path from 'path';
+import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
 import OpenAI from 'openai';
-import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
-
 console.log('=== Running serverD.js ===');
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE
 );
 
-const IMAGE_DIR = './data/images';
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function ensureImageDir() {
-  await fs.mkdir(IMAGE_DIR, { recursive: true });
-}
+async function listUnprocessedPromptFiles() {
+  const { data: files, error } = await supabase.storage.from('prompts').list('', {
+    limit: 100,
+    sortBy: { column: 'name', order: 'asc' }
+  });
 
-async function fetchPendingPromptBatch() {
-  const { data, error } = await supabase
-    .from('prompt_batches')
-    .select('*')
-    .eq('processed', false)
-    .order('created_at', { ascending: true })
-    .limit(1);
-
-  if (error) {
-    console.error('✗ Failed to fetch pending batch:', error);
-    return null;
+  if (error || !files) {
+    console.error('✗ Failed to list prompt files:', error);
+    return [];
   }
 
-  return data?.[0] || null;
+  return files.filter(f => f.name.endsWith('.json') && !f.name.endsWith('.done.json'));
 }
 
-async function markBatchAsDone(batchId) {
-  const { error } = await supabase
-    .from('prompt_batches')
-    .update({ processed: true })
-    .eq('id', batchId);
-
-  if (error) {
-    console.error('✗ Failed to mark batch as done:', error);
-  } else {
-    console.log(`✓ Marked batch ${batchId} as complete`);
+async function loadPrompts(filename) {
+  const { data, error } = await supabase.storage.from('prompts').download(filename);
+  if (error || !data) {
+    console.error(`✗ Failed to download ${filename}:`, error);
+    return [];
   }
-}
 
-async function parseBatchPrompts(batch) {
+  const text = await data.text();
   try {
-    const parsed = JSON.parse(batch.prompts);
-    if (Array.isArray(parsed)) return parsed;
-    return [];
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed.prompts) ? parsed.prompts : [];
   } catch {
-    console.warn('✗ Failed to parse prompt batch JSON');
+    console.warn(`✗ Failed to parse prompts in ${filename}`);
     return [];
   }
 }
 
-async function downloadImage(url, filename) {
+async function downloadImageBuffer(url) {
   const res = await axios.get(url, { responseType: 'arraybuffer' });
-  await fs.writeFile(path.join(IMAGE_DIR, filename), res.data);
-  console.log(`✓ Saved image: ${filename}`);
+  return res.data;
 }
 
-async function generateImage(prompt, index, batchTag) {
+async function uploadImageToBucket(buffer, filename) {
+  const { error } = await supabase.storage
+    .from('generated-images')
+    .upload(filename, new Blob([buffer], { type: 'image/png' }), {
+      contentType: 'image/png',
+      upsert: false
+    });
+
+  if (error) {
+    console.error(`✗ Failed to upload ${filename}:`, error);
+  } else {
+    console.log(`✓ Uploaded image: ${filename}`);
+  }
+}
+
+function getBatchTagFromFilename(name) {
+  return name.replace(/^generated-prompts-/, '').replace(/\.json$/, '');
+}
+
+async function generateImage(prompt, index, tag) {
   const response = await openai.images.generate({
     model: 'dall-e-3',
     prompt,
@@ -79,49 +79,48 @@ async function generateImage(prompt, index, batchTag) {
     size: '1024x1024'
   });
 
-  if (!response.data || !Array.isArray(response.data) || response.data.length === 0) {
-    throw new Error(`No image data returned for prompt: ${prompt}`);
-  }
+  const url = response.data?.[0]?.url;
+  if (!url) throw new Error('No image URL returned.');
 
-  const url = response.data[0].url;
-  if (!url) {
-    throw new Error(`Image URL missing for prompt: ${prompt}`);
-  }
-
-  const filename = `image-${batchTag}-${index + 1}.png`;
-  await downloadImage(url, filename);
+  const buffer = await downloadImageBuffer(url);
+  const filename = `image-${tag}-${index + 1}.png`;
+  await uploadImageToBucket(buffer, filename);
 }
 
-function getBatchTagFromTimestamp(ts) {
-  return ts.replace(/[-:T]/g, '').slice(0, 14);
+async function flagPromptFileDone(name) {
+  const { data, error } = await supabase.storage
+    .from('prompts')
+    .move(name, name.replace('.json', '.done.json'));
+
+  if (error) console.error(`✗ Failed to flag ${name} as done:`, error);
+  else console.log(`✓ Flagged ${name} as complete`);
 }
 
 async function run() {
-  await ensureImageDir();
-
-  const batch = await fetchPendingPromptBatch();
-  if (!batch) {
-    console.log('No unprocessed prompt batches found.');
+  const files = await listUnprocessedPromptFiles();
+  if (files.length === 0) {
+    console.log('No unprocessed prompt files.');
     return;
   }
 
-  const prompts = await parseBatchPrompts(batch);
-  const batchTag = getBatchTagFromTimestamp(batch.created_at);
+  for (const file of files) {
+    const prompts = await loadPrompts(file.name);
+    const tag = getBatchTagFromFilename(file.name);
 
-  console.log(`→ Rendering ${prompts.length} prompts from batch ${batch.id}`);
-
-  for (let i = 0; i < prompts.length; i++) {
-    try {
-      await generateImage(prompts[i], i, batchTag);
-    } catch (err) {
-      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+    for (let i = 0; i < prompts.length; i++) {
+      try {
+        await generateImage(prompts[i], i, tag);
+      } catch (err) {
+        console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+      }
     }
+
+    await flagPromptFileDone(file.name);
   }
 
-  await markBatchAsDone(batch.id);
   console.log('✓ All image generations complete.');
 }
 
-run().catch((err) => {
+run().catch(err => {
   console.error('✗ serverD failed:', err);
 });
