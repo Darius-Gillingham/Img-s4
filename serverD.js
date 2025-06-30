@@ -88,7 +88,7 @@ async function generateImage(prompt, index, tag) {
 }
 
 async function flagPromptFileDone(name) {
-  const { data, error } = await supabase.storage
+  const { error } = await supabase.storage
     .from('prompts')
     .move(name, name.replace('.json', '.done.json'));
 
@@ -96,31 +96,38 @@ async function flagPromptFileDone(name) {
   else console.log(`✓ Flagged ${name} as complete`);
 }
 
-async function run() {
-  const files = await listUnprocessedPromptFiles();
-  if (files.length === 0) {
-    console.log('No unprocessed prompt files.');
-    return;
-  }
-
-  for (const file of files) {
-    const prompts = await loadPrompts(file.name);
-    const tag = getBatchTagFromFilename(file.name);
-
-    for (let i = 0; i < prompts.length; i++) {
-      try {
-        await generateImage(prompts[i], i, tag);
-      } catch (err) {
-        console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+async function loopForever(intervalMs = 30000) {
+  while (true) {
+    try {
+      const files = await listUnprocessedPromptFiles();
+      if (files.length === 0) {
+        console.log('No unprocessed prompt files.');
+        await new Promise(res => setTimeout(res, intervalMs));
+        continue;
       }
+
+      for (const file of files) {
+        const prompts = await loadPrompts(file.name);
+        const tag = getBatchTagFromFilename(file.name);
+
+        for (let i = 0; i < prompts.length; i++) {
+          try {
+            await generateImage(prompts[i], i, tag);
+          } catch (err) {
+            console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+          }
+        }
+
+        await flagPromptFileDone(file.name);
+      }
+
+      console.log('✓ Batch complete.');
+    } catch (err) {
+      console.error('✗ serverD loop failed:', err);
     }
 
-    await flagPromptFileDone(file.name);
+    await new Promise(res => setTimeout(res, intervalMs));
   }
-
-  console.log('✓ All image generations complete.');
 }
 
-run().catch(err => {
-  console.error('✗ serverD failed:', err);
-});
+loopForever();
