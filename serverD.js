@@ -45,18 +45,25 @@ async function loadPrompts(filename) {
 }
 
 function getRandomPrompt(prompts) {
-  return prompts[Math.floor(Math.random() * prompts.length)];
+  const validPrompts = prompts.filter(
+    p => typeof p === 'string' && p.trim().length > 5
+  );
+  if (validPrompts.length === 0) {
+    console.warn('✗ No valid prompts found.');
+    return null;
+  }
+  return validPrompts[Math.floor(Math.random() * validPrompts.length)];
 }
 
 async function downloadImageBuffer(url) {
   const res = await axios.get(url, { responseType: 'arraybuffer' });
-  return res.data;
+  return Buffer.from(res.data);
 }
 
 async function uploadImageToBucket(buffer, filename) {
   const { error } = await supabase.storage
     .from('generated-images')
-    .upload(filename, new Blob([buffer], { type: 'image/png' }), {
+    .upload(filename, buffer, {
       contentType: 'image/png',
       upsert: false
     });
@@ -76,6 +83,7 @@ function getTimestampedFilename(index) {
 
 async function generateImage(prompt, index) {
   const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`;
+  console.log(`→ Generating image for prompt: "${cleanPrompt}"`);
 
   const response = await openai.images.generate({
     model: 'dall-e-3',
@@ -99,7 +107,6 @@ async function run(batchSize = 5) {
     return;
   }
 
-  // Use all prompts from all files
   let allPrompts = [];
   for (const file of files) {
     const prompts = await loadPrompts(file.name);
@@ -115,10 +122,15 @@ async function run(batchSize = 5) {
 
   for (let i = 0; i < batchSize; i++) {
     const prompt = getRandomPrompt(allPrompts);
+    if (!prompt) {
+      console.warn(`✗ Skipping image #${i + 1}: No valid prompt`);
+      continue;
+    }
     try {
       await generateImage(prompt, i);
     } catch (err) {
-      console.warn(`✗ Failed to generate image #${i + 1}:`, err);
+      console.warn(`✗ Failed to generate image #${i + 1}: ${err.name} ${err.status} - ${err.message}`);
+      console.error(err);
     }
   }
 
