@@ -82,7 +82,7 @@ function getTimestampedFilename(index) {
 }
 
 async function generateImage(prompt, index) {
-  const cleanPrompt = `Do not include any text, letters, words, numbers, or symbols in the image. ${prompt}`;
+  const cleanPrompt = `No text overlay. ${prompt.trim()}`;
   console.log(`→ Generating image for prompt: "${cleanPrompt}"`);
 
   const response = await openai.images.generate({
