@@ -1,5 +1,5 @@
 // File: serverD.js
-// Commit: repurpose serverD to index Supabase images into `image_index` table
+// Purpose: Index all .png images in 'generated-images' bucket into 'image_index' table
 
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
